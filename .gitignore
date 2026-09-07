@@ -1,0 +1,17 @@
+# Python Virtual Environments (Don't upload virtual environment folders)
+.venv/
+venv/
+ENV/
+env/
+
+# Python Cache (Don't upload compiled cache files)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Streamlit Local Configurations (Don't upload local passwords/secrets)
+.streamlit/secrets.toml
+
+# Operating System System Files
+.DS_Store
+Thumbs.db
