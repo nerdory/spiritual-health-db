@@ -32,6 +32,30 @@ def generate_member_id(name: str, pin: str) -> str:
     return f"{clean_name}{clean_pin}"
 
 
+def parse_consent(answer) -> bool:
+    """Interprets a consent answer as a boolean.
+
+    Matches "Consent" in the question title (see `load_data`) and inspects the
+    answer text: an explicit "Yes" grants consent, "No" withholds it. Anything
+    else (blank, unrecognized wording) is treated as NO consent, so a missing
+    or ambiguous answer never exposes a member's results by accident.
+
+    Args:
+        answer: Raw consent answer text from the sheet (may be NaN).
+
+    Returns:
+        bool: True only when the member explicitly agreed.
+    """
+    if pd.isna(answer):
+        return False
+    text = str(answer).strip()
+    if re.search(r"\byes\b", text, re.IGNORECASE):
+        return True
+    if re.search(r"\bno\b", text, re.IGNORECASE):
+        return False
+    return False
+
+
 def load_google_sheet_data() -> pd.DataFrame:
     """Fetches response records directly from the public Google Sheet export URL.
 
@@ -131,13 +155,18 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
     longitudinal tracking (past submissions keep the group/track context
     they were submitted under).
 
+    Members who decline the optional leader-sharing consent question are flagged
+    with `has_consent = False` so the Leader Dashboard can mask their identity,
+    scores, and charts.
+
     Returns:
         tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             - people: Clean DataFrame of unique members (latest submission).
             - responses: Aggregated 6-axis category scores per member (latest only).
             - q_responses: Question-level responses (Q1-Q24) per member (latest only).
             - submissions: One row per submission ever made — person_id, name,
-              group, is_believer, timestamp, take (1 = first), and axis means.
+              group, is_believer, has_consent, timestamp, take (1 = first), and
+              axis means.
             - q_history: Question-level responses for every submission, with
               take number and timestamp, chronological per member.
     """
@@ -151,6 +180,8 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
     pin_col = next((c for c in df.columns if "PIN" in c), None)
     group_col = next((c for c in df.columns if "group" in c.lower()), None)
     journey_col = next((c for c in df.columns if "spiritual journey" in c.lower()), None)
+    # Optional leader-sharing consent question, matched by "Consent" in the title.
+    consent_col = next((c for c in df.columns if "consent" in c.lower()), None)
 
     if not all([name_col, pin_col, group_col]):
         missing = [c for c, v in [("Name", name_col), ("PIN", pin_col), ("Group", group_col)] if v is None]
@@ -166,6 +197,13 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
     else:
         df["is_believer"] = True
 
+    # Per-submission consent flag. A sheet with no consent question keeps the
+    # previous behavior (everything visible to leaders).
+    if consent_col:
+        df["has_consent"] = df[consent_col].map(parse_consent)
+    else:
+        df["has_consent"] = True
+
     timestamp_col = "Timestamp" if "Timestamp" in df.columns else df.columns[0]
     df["clean_timestamp"] = pd.to_datetime(df[timestamp_col], errors="coerce")
 
@@ -174,9 +212,9 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
     df["take"] = df.groupby("person_id").cumcount() + 1
 
     metadata_cols = {
-        name_col, pin_col, group_col, journey_col, timestamp_col,
+        name_col, pin_col, group_col, journey_col, consent_col, timestamp_col,
         "clean_name", "clean_pin", "clean_group", "person_id", "is_believer",
-        "clean_timestamp", "take",
+        "has_consent", "clean_timestamp", "take",
     }
     all_q_cols = [c for c in df.columns if c not in metadata_cols]
 
@@ -185,7 +223,9 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
     latest_df = df.groupby("person_id", as_index=False).last()
     latest_merged, q_responses = _question_frames(_map_scores(latest_df, all_q_cols), all_q_cols)
 
-    people = latest_merged[["person_id", "clean_name", "clean_group", "is_believer", "clean_timestamp"]].copy()
+    people = latest_merged[
+        ["person_id", "clean_name", "clean_group", "is_believer", "has_consent", "clean_timestamp"]
+    ].copy()
     people.rename(columns={"clean_name": "name", "clean_group": "group", "clean_timestamp": "timestamp"}, inplace=True)
 
     response_rows = []
@@ -207,7 +247,8 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
     history_merged, q_history = _question_frames(_map_scores(df, all_q_cols), all_q_cols)
 
     submissions = history_merged[
-        ["person_id", "clean_name", "clean_group", "is_believer", "clean_timestamp", "take", *AXIS_MAPPING.keys()]
+        ["person_id", "clean_name", "clean_group", "is_believer", "has_consent",
+         "clean_timestamp", "take", *AXIS_MAPPING.keys()]
     ].copy()
     submissions.rename(
         columns={"clean_name": "name", "clean_group": "group", "clean_timestamp": "timestamp"},
