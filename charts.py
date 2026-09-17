@@ -152,7 +152,9 @@ def polar_scatter_chart(
     return fig
 
 
-def individual_question_dot_plot(member_q_responses: pd.DataFrame) -> go.Figure:
+def individual_question_dot_plot(
+    member_q_responses: pd.DataFrame, axis_scores_df: pd.DataFrame | None = None
+) -> go.Figure:
     """Renders bottom non-overlapping circular dot plot for individual question scores.
 
     Places every question at its own computed angle: each axis owns a 60°
@@ -162,6 +164,10 @@ def individual_question_dot_plot(member_q_responses: pd.DataFrame) -> go.Figure:
 
     Args:
         member_q_responses (pd.DataFrame): Question-level scores (Q1-Q24) for member.
+        axis_scores_df (pd.DataFrame | None): Optional category/score frame with
+            the member's per-axis averages. When given, a translucent blue
+            spiderweb is drawn beneath the dots, connecting each axis average
+            at its sector's center gridline.
 
     Returns:
         go.Figure: Circular dot plot figure.
@@ -170,6 +176,30 @@ def individual_question_dot_plot(member_q_responses: pd.DataFrame) -> go.Figure:
 
     sector_deg = 360 / len(AXIS_ORDER)  # 60° per axis
     axis_center = {axis: idx * sector_deg for idx, axis in enumerate(AXIS_ORDER)}
+
+    # Spiderweb overlay is added first so the question dots render on top.
+    if axis_scores_df is not None and not axis_scores_df.empty:
+        score_dict = dict(zip(axis_scores_df["category"], axis_scores_df["score"]))
+        web_scores = [score_dict.get(a, 0) for a in AXIS_ORDER]
+        web_labels = [clean_axis_label(a) for a in AXIS_ORDER]
+        fig.add_trace(
+            go.Scatterpolar(
+                r=web_scores + [web_scores[0]],
+                theta=[axis_center[a] for a in AXIS_ORDER] + [axis_center[AXIS_ORDER[0]]],
+                fill="toself",
+                mode="lines",
+                name="Axis Average",
+                line=dict(color="#1F77B4", width=2),
+                fillcolor="rgba(31, 119, 180, 0.12)",
+                opacity=0.55,
+                customdata=[[lbl, f"{s:g}"] for lbl, s in zip(web_labels, web_scores)]
+                + [[web_labels[0], f"{web_scores[0]:g}"]],
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>Axis average: "
+                    "<b>%{customdata[1]} / 5</b><extra></extra>"
+                ),
+            )
+        )
 
     df = member_q_responses.copy()
     df["color"] = df["axis"].map(AXIS_COLORS).fillna("#1F77B4")
@@ -299,6 +329,10 @@ def group_radar_chart(
 ) -> go.Figure:
     """Renders group radar chart showing member trajectories.
 
+    Callers pass consenting members only, so colors and legend entries align
+    with the highlight pills. Members with `has_consent = False` are skipped
+    here too, as a defensive measure.
+
     Args:
         group_responses_df (pd.DataFrame): Responses for members in group.
         members_df (pd.DataFrame): Member details DataFrame.
@@ -314,6 +348,10 @@ def group_radar_chart(
     for idx, row in members_df.iterrows():
         member_name = row["name"]
         is_believer = row.get("is_believer", True)
+
+        if not bool(row.get("has_consent", True)):
+            continue
+
         member_resp = group_responses_df[group_responses_df["name"] == member_name]
 
         if member_resp.empty:
