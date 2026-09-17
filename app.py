@@ -66,6 +66,19 @@ def _fmt_date(ts) -> str:
     return f"{ts.day} {ts.strftime('%b')} '{ts.strftime('%y')}"
 
 
+def _first_name(name) -> str:
+    """Returns only the first token of a member's name, for privacy masking.
+
+    Args:
+        name: Full display name from the sheet.
+
+    Returns:
+        str: First name (or the whole value when it has no spaces).
+    """
+    parts = str(name).split()
+    return parts[0] if parts else "Member"
+
+
 def _legend_axis_html(axis_name: str, legend_df: pd.DataFrame) -> str:
     """Builds the HTML block for a single axis of the question legend.
 
@@ -209,9 +222,8 @@ def render_member_charts(
 ) -> None:
     """Renders the Axis Comparison radar and Response Breakdown dot plot side by side.
 
-    Shared by Individual View and the Leader Dashboard's member inspect panel so
-    both views show the identical design. `st.columns(2)` stacks vertically on
-    narrow (mobile) screens automatically.
+    Used by the Individual View. `st.columns(2)` stacks vertically on narrow
+    (mobile) screens automatically.
 
     Args:
         member_responses (pd.DataFrame): Category-level scores for the member.
@@ -436,7 +448,11 @@ def individual_view() -> None:
 
 def leader_view() -> None:
     """Renders Group Leader View with track filtering, member inspect with
-    historical snapshots, and Member Directory Table."""
+    historical snapshots, and Member Directory Table.
+
+    Members who declined leader-sharing consent are excluded from every chart
+    and selector; they appear only as masked rows in the directory.
+    """
     status = st.empty()
     passcode_input = st.text_input(
         "Enter Season Access Code:", type="password", key="season_passcode_input"
@@ -505,97 +521,124 @@ def leader_view() -> None:
         f"Showing **{len(filtered_members)}** members in group **{group}** | 📌 **Solid lines** = Followers | 📌 **Dashed lines** = Exploring Faith"
     )
 
-    group_resp = group_responses(season_people, season_responses, group)
+    # Group averages and trajectories cover consenting members only. Otherwise
+    # a leader who sees the group average plus every consenting member's scores
+    # could back out a private member's numbers arithmetically in a small group.
+    consenting_people = season_people[season_people["has_consent"].astype(bool)]
+    group_resp = group_responses(consenting_people, season_responses, group)
 
-    pill_options = ["🔍 All Members"] + [
-        f"{get_dynamic_color_and_emoji(i, len(filtered_members))[1]} {name}"
-        for i, name in enumerate(filtered_members["name"])
-    ]
+    # Members who declined consent are absent from every chart and selector
+    # below; they still appear (masked) in the directory at the bottom.
+    visible_members = filtered_members[
+        filtered_members["has_consent"].astype(bool)
+    ].reset_index(drop=True)
 
     st.divider()
     st.markdown("### Subgroup Chart")
-    selected_pill = st.pills("Highlight Member:", pill_options, default="🔍 All Members")
 
-    highlight_name = None
-    if selected_pill and selected_pill != "🔍 All Members":
-        highlight_name = selected_pill.split(" ", 1)[1]
-
-    st.plotly_chart(
-        group_radar_chart(group_resp, filtered_members, highlight_member=highlight_name),
-        use_container_width=True,
-        key="chart-group-radar",
-        config=PLOTLY_CONFIG,
-    )
-
-    st.divider()
-    st.markdown("### Individual Member Charts")
-
-    member_records = filtered_members.to_dict("records")
-    selected_idx = st.selectbox(
-        "Select a member to view their individual results:",
-        options=range(len(member_records)),
-        format_func=lambda i: str(member_records[i]["name"]),
-        key="leader_member_select",
-    )
-    selected_member = member_records[selected_idx]
-    member_name = str(selected_member["name"])
-    member_id = selected_member["person_id"]
-
-    member_subs, member_q_hist = person_history(season_submissions, season_q_history, member_id)
-
-    if member_subs.empty:
-        st.info("No assessment data found for this member.")
+    if visible_members.empty:
+        st.info("No member in this selection has consented to share their results with leaders.")
     else:
-        # Group averages always use each member's LATEST submission only, so a
-        # member with multiple takes is never double-counted.
-        group_avg = category_means(group_resp)
-        n_takes = len(member_subs)
-        latest_take = int(member_subs["take"].max())
+        pill_options = ["🔍 All Members"] + [
+            f"{get_dynamic_color_and_emoji(i, len(visible_members))[1]} {name}"
+            for i, name in enumerate(visible_members["name"])
+        ]
+        selected_pill = st.pills("Highlight Member:", pill_options, default="🔍 All Members")
 
-        if n_takes > 1:
-            take_labels = {
-                int(row["take"]): f"Take {int(row['take'])} · {_fmt_date(row['timestamp'])}"
-                for _, row in member_subs.iterrows()
-            }
-            selected_take = st.selectbox(
-                "View submission:",
-                options=[int(t) for t in member_subs["take"]],
-                index=n_takes - 1,
-                format_func=lambda t: take_labels[t] + (" (Latest)" if t == latest_take else ""),
-                key=f"leader_take_select_{member_id}",
-            )
-        else:
-            selected_take = latest_take
+        highlight_name = None
+        if selected_pill and selected_pill != "🔍 All Members":
+            highlight_name = selected_pill.split(" ", 1)[1]
 
-        sub_row = member_subs[member_subs["take"] == selected_take].iloc[0]
-        snapshot_responses = submission_category_scores(sub_row)
-        snapshot_q = member_q_hist[member_q_hist["take"] == selected_take]
-
-        # Track/group context as it was at THAT submission (a member who moved
-        # from Exploring Faith to Follower of Jesus keeps their old context).
-        track_then = "Follower of Jesus" if sub_row["is_believer"] else "Exploring Faith"
-        caption = f"Track: **{track_then}**"
-        if n_takes > 1:
-            caption += f" | Submission **{selected_take} of {n_takes}**"
-        if sub_row["group"] != group:
-            caption += f" | Group at that time: **{sub_row['group']}**"
-        st.caption(caption)
-
-        render_member_charts(
-            snapshot_responses, snapshot_q, member_name, group_avg, key_prefix="chart-leader-ind"
+        st.plotly_chart(
+            group_radar_chart(group_resp, visible_members, highlight_member=highlight_name),
+            use_container_width=True,
+            key="chart-group-radar",
+            config=PLOTLY_CONFIG,
         )
 
         st.divider()
-        render_question_key(snapshot_q)
+        st.markdown("### Individual Member Charts")
+
+        member_records = visible_members.to_dict("records")
+        selected_idx = st.selectbox(
+            "Select a member to view their individual results:",
+            options=range(len(member_records)),
+            format_func=lambda i: str(member_records[i]["name"]),
+            # Key varies by group/track so the widget is recreated (index 0)
+            # when either changes — a fixed key would keep a stale positional
+            # selection pointing at a different group's member.
+            key=f"leader_member_select_{group}_{track_filter}",
+        )
+        selected_member = member_records[selected_idx]
+        member_id = selected_member["person_id"]
+
+        member_subs, member_q_hist = person_history(season_submissions, season_q_history, member_id)
+
+        if member_subs.empty:
+            st.info("No assessment data found for this member.")
+        else:
+            n_takes = len(member_subs)
+            latest_take = int(member_subs["take"].max())
+
+            if n_takes > 1:
+                take_labels = {
+                    int(row["take"]): f"Take {int(row['take'])} · {_fmt_date(row['timestamp'])}"
+                    for _, row in member_subs.iterrows()
+                }
+                selected_take = st.selectbox(
+                    "View submission:",
+                    options=[int(t) for t in member_subs["take"]],
+                    index=n_takes - 1,
+                    format_func=lambda t: take_labels[t] + (" (Latest)" if t == latest_take else ""),
+                    key=f"leader_take_select_{member_id}",
+                )
+            else:
+                selected_take = latest_take
+
+            sub_row = member_subs[member_subs["take"] == selected_take].iloc[0]
+            snapshot_responses = submission_category_scores(sub_row)
+            snapshot_q = member_q_hist[member_q_hist["take"] == selected_take]
+
+            # Track/group context as it was at THAT submission (a member who moved
+            # from Exploring Faith to Follower of Jesus keeps their old context).
+            track_then = "Follower of Jesus" if sub_row["is_believer"] else "Exploring Faith"
+            caption = f"Track: **{track_then}**"
+            if n_takes > 1:
+                caption += f" | Submission **{selected_take} of {n_takes}**"
+            if sub_row["group"] != group:
+                caption += f" | Group at that time: **{sub_row['group']}**"
+            st.caption(caption)
+
+            # Leaders get one combined chart instead of the individual-vs-group
+            # radar: the member's axis averages as a translucent spiderweb
+            # overlaid on their per-question breakdown.
+            st.markdown("#### Response Breakdown")
+            st.plotly_chart(
+                individual_question_dot_plot(snapshot_q, axis_scores_df=snapshot_responses),
+                use_container_width=True,
+                key="chart-leader-ind-dots",
+                config=PLOTLY_CONFIG,
+            )
+
+            st.divider()
+            render_question_key(snapshot_q)
 
     st.divider()
     st.markdown("### Group Member Directory")
-    directory_df = filtered_members[["name", "person_id", "is_believer"]].copy()
+    directory_df = filtered_members[["name", "person_id", "is_believer", "has_consent"]].copy()
     directory_df["Track"] = directory_df["is_believer"].map(
         {True: "Follower of Jesus", False: "Exploring Faith"}
     )
+    # Count questionnaires while the real IDs are still present.
     take_counts = season_submissions.groupby("person_id").size()
     directory_df["Takes"] = directory_df["person_id"].map(take_counts).fillna(0).astype(int)
+
+    # Members who declined consent keep only First Name, Track and questionnaire
+    # count; their Unique ID is shown as "Private".
+    private_mask = ~directory_df["has_consent"].astype(bool)
+    directory_df.loc[private_mask, "name"] = directory_df.loc[private_mask, "name"].map(_first_name)
+    directory_df.loc[private_mask, "person_id"] = "Private"
+
     directory_df.rename(
         columns={"name": "Member Name", "person_id": "Member ID"}, inplace=True
     )
@@ -606,7 +649,8 @@ def leader_view() -> None:
         hide_index=True,
     )
 
-    dup_warnings = _duplicate_id_warnings(all_members)
+    # Only consenting members are checked, so a private ID is never printed here.
+    dup_warnings = _duplicate_id_warnings(all_members[all_members["has_consent"].astype(bool)])
     if dup_warnings:
         st.warning(
             "⚠️ **Possible duplicate Member IDs in this group:**\n\n"
