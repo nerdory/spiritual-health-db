@@ -517,8 +517,17 @@ def leader_view() -> None:
         st.info("No participants found matching this filter selection.")
         return
 
+    private_count = int((~filtered_members["has_consent"].astype(bool)).sum())
+    private_note = ""
+    if private_count:
+        private_note = (
+            f", {private_count} of which "
+            + ("chooses" if private_count == 1 else "choose")
+            + " to keep their results private"
+        )
     st.caption(
-        f"Showing **{len(filtered_members)}** members in group **{group}** | 📌 **Solid lines** = Followers | 📌 **Dashed lines** = Exploring Faith"
+        f"Showing **{len(filtered_members)}** members in group **{group}**{private_note} "
+        "| 📌 **Solid lines** = Followers | 📌 **Dashed lines** = Exploring Faith"
     )
 
     # Group averages and trajectories cover consenting members only. Otherwise
